@@ -8,7 +8,6 @@ import re
 
 app = FastAPI()
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,50 +16,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MAX_SIZE = 200 * 1024 * 1024  # 200 MB
+
+
 @app.get("/")
 def root():
     return {"status": "ok"}
 
+
 def clean_text(text):
-    # Normalizar saltos de línea
     text = text.replace("\r", "")
-
-    # Eliminar espacios repetidos
     text = re.sub(r"[ \t]+", " ", text)
-
-    # Eliminar demasiados saltos seguidos
     text = re.sub(r"\n{3,}", "\n\n", text)
-
-    # Eliminar líneas que solo contienen números de página
     text = re.sub(r"^\s*\d+\s*$", "", text, flags=re.MULTILINE)
-
     return text.strip()
+
 
 @app.post("/extract-text")
 async def extract_text(file: UploadFile = File(...)):
     temp_path = None
 
     try:
-        content = await file.read()
+        size = 0
 
         with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=".pdf"
         ) as tmp:
-            tmp.write(content)
+
             temp_path = tmp.name
+
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1 MB
+
+                if not chunk:
+                    break
+
+                size += len(chunk)
+
+                if size > MAX_SIZE:
+                    tmp.close()
+                    os.remove(temp_path)
+
+                    return JSONResponse(
+                        {"error": "PDF supera 200 MB"},
+                        status_code=413
+                    )
+
+                tmp.write(chunk)
 
         reader = PdfReader(temp_path)
 
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
+        text_parts = []
 
-        text = clean_text(text)
+        for page in reader.pages:
+            text_parts.append(page.extract_text() or "")
+
+        text = clean_text("\n".join(text_parts))
 
         return {
             "pages": len(reader.pages),
             "characters": len(text),
+            "size_mb": round(size / (1024 * 1024), 2),
             "text": text
         }
 
