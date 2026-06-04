@@ -1,4 +1,12 @@
 fastapi
 uvicorn
-python-multipart
 pypdf
+python-multipart
+cryptography
+python-docx
+beautifulsoup4
+openpyxl
+python-pptx
+striprtf
+py7zr
+filetype
