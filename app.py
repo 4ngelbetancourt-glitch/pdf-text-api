@@ -82,7 +82,7 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 # ----------------------------------------------------------------------
-# Format detection (content first, then extension, then MIME type)
+# Format detection (content first, then magic bytes, then extension, then MIME)
 # ----------------------------------------------------------------------
 def detect_format(file_path: str, original_filename: str) -> str:
     """
@@ -104,6 +104,8 @@ def detect_format(file_path: str, original_filename: str) -> str:
             "application/vnd.oasis.opendocument.spreadsheet": "ods",
             "application/zip": "zip",
             "application/x-7z-compressed": "7z",
+            "application/x-rar-compressed": "rar",
+            "application/vnd.rar": "rar",
             "application/rtf": "rtf",
             "text/plain": "txt",
             "text/html": "html",
@@ -116,18 +118,18 @@ def detect_format(file_path: str, original_filename: str) -> str:
         # Try by MIME first
         if mime in mime_map:
             return mime_map[mime]
-        # Try by extension
+        # Try by extension returned by filetype
         if ext in ("pdf", "docx", "xlsx", "pptx", "odt", "ods",
-                    "zip", "7z", "rtf", "txt", "html", "csv", "json",
+                    "zip", "7z", "rar", "rtf", "txt", "html", "csv", "json",
                     "xml", "md", "log"):
             return ext
-        # Check extension from filename
+        # Try extension from original filename (before falling through)
         ext = os.path.splitext(original_filename)[1].lower().lstrip(".")
         if ext in ("pdf", "docx", "xlsx", "pptx", "odt", "ods",
-                    "zip", "7z", "rtf", "txt", "html", "csv", "json",
+                    "zip", "7z", "rar", "rtf", "txt", "html", "csv", "json",
                     "xml", "md", "log"):
             return ext
-        return "unknown"
+        # Do NOT return "unknown" here – let it fall through to magic bytes and MIME fallback
 
     # 2. Manual magic bytes check for formats not covered by filetype (e.g., RAR)
     try:
@@ -138,7 +140,7 @@ def detect_format(file_path: str, original_filename: str) -> str:
     except Exception:
         pass
 
-    # 3. Fallback to extension from original filename
+    # 3. Fallback to extension from original filename (already checked above, but just in case)
     ext = os.path.splitext(original_filename)[1].lower().lstrip(".")
     ext_map = {
         "pdf": "pdf",
