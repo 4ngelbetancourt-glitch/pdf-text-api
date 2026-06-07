@@ -500,14 +500,9 @@ def process_archive(file_path: str, archive_type: str,
                         failed += 1
                         continue
 
-                    # Create the directory structure for this member (normalized to NFC)
-                    member_path_nfc = unicodedata.normalize('NFC', member.filename)
-                    extracted_path = os.path.join(temp_dir, member_path_nfc)
-                    os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
-
+                    # Extract to temp_dir base; unrar will create the full internal path
                     try:
-                        # Extract the member; unrar will create the file with its own Unicode representation
-                        rf.extract(member, path=os.path.dirname(extracted_path))
+                        rf.extract(member, path=temp_dir)
                     except rarfile.RarWrongPassword:
                         logger.warning(f"Wrong password for RAR entry: {member.filename}, skipping.")
                         failed += 1
@@ -519,12 +514,12 @@ def process_archive(file_path: str, archive_type: str,
                         context.files_failed += 1
                         continue
 
-                    # After extraction, the actual file might have a slightly different name due to
-                    # Unicode normalization differences. We locate it by normalizing both expected
-                    # and actual file names to NFC and comparing.
+                    # Build the expected path (normalized to NFC)
+                    expected_path_nfc = os.path.join(temp_dir, unicodedata.normalize('NFC', member.filename))
+                    # Find the actual extracted file (name may differ in Unicode normalization)
                     actual_extracted_path = None
+                    parent_dir = os.path.dirname(expected_path_nfc)
                     expected_basename_nfc = unicodedata.normalize('NFC', os.path.basename(member.filename))
-                    parent_dir = os.path.dirname(extracted_path)
                     try:
                         for fname in os.listdir(parent_dir):
                             if unicodedata.normalize('NFC', fname) == expected_basename_nfc:
@@ -534,8 +529,8 @@ def process_archive(file_path: str, archive_type: str,
                         pass
 
                     if actual_extracted_path is None:
-                        # Fallback to the constructed path if no match found (should not happen, but just in case)
-                        actual_extracted_path = extracted_path
+                        # Fallback to the NFC-constructed path if the directory listing fails
+                        actual_extracted_path = expected_path_nfc
 
                     if not os.path.exists(actual_extracted_path):
                         logger.error(f"Extracted file not found after RAR extraction: {actual_extracted_path}")
