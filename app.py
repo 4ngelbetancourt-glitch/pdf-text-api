@@ -5,6 +5,7 @@ import tempfile
 import time
 import zipfile
 import logging
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import filetype
@@ -498,59 +499,14 @@ def process_archive(file_path: str, archive_type: str,
                         logger.warning(f"File too large inside RAR: {member.filename}")
                         failed += 1
                         continue
-                    # Extract to a temporary file with a safe name to avoid path issues
-                    suffix = os.path.splitext(member.filename)[1] or ".tmp"
-                    fd, extracted_path = tempfile.mkstemp(suffix=suffix, prefix="rar_")
-                    os.close(fd)  # We just need the path; we'll write via rarfile
-                    try:
-                        # Extract the member to the safe temporary path
-                        rf.extract(member, path=os.path.dirname(extracted_path))
-                        # rarfile extracts using the member's basename inside the path directory,
-                        # so we need to find the actual extracted file.
-                        # However, since we used a unique temp path, we can't easily know the filename.
-                        # Better: extract to temp_dir first, then rename if needed.
-                        # Let's change strategy: extract to temp_dir, then locate the file.
-                    except rarfile.RarWrongPassword:
-                        logger.warning(f"Wrong password for RAR entry: {member.filename}, skipping.")
-                        failed += 1
-                        context.files_failed += 1
-                        try:
-                            os.remove(extracted_path)
-                        except Exception:
-                            pass
-                        continue
-                    except rarfile.RarCryptoError:
-                        logger.warning(f"Encryption error in RAR entry: {member.filename}, skipping.")
-                        failed += 1
-                        context.files_failed += 1
-                        try:
-                            os.remove(extracted_path)
-                        except Exception:
-                            pass
-                        continue
 
-                    # After extraction, the file should be at extracted_path if we used the correct name.
-                    # But we used a temp name, so it won't match. Let's fix the approach:
-                    # We'll extract directly to temp_dir, then process.
-                    # Overwrite the extracted_path variable to the expected location.
-                    # Actually, let's simplify: just extract the member to temp_dir, then use
-                    # os.path.join(temp_dir, member.filename) as the extracted_path.
-                    # That's what we were doing, but it failed due to special chars.
-                    # To avoid that, we'll extract to a safe flat name.
-                    # Let's do: extract to temp_dir, then rename the resulting file (which will have
-                    # the original basename) to a safe name, process it, and delete.
-                    # Better: use `rf.extractall(path=temp_dir, members=[member])`? No.
-                    # Let's stick to the simple method: use member.filename but ensure directory exists.
-                    # The error was "No such file or directory" meaning the parent directory didn't exist.
-                    # So we should ensure os.makedirs before extraction.
-                    # The original code already did that, but maybe it failed because of Unicode normalization.
-                    # Let's force the creation of the exact path.
-                    # We'll go back to the original approach but with robust directory creation.
-
-                    # Reset extracted_path to the intended location
-                    extracted_path = os.path.join(temp_dir, member.filename)
+                    # Create the directory structure for this member (normalized to NFC)
+                    member_path_nfc = unicodedata.normalize('NFC', member.filename)
+                    extracted_path = os.path.join(temp_dir, member_path_nfc)
                     os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
+
                     try:
+                        # Extract the member; unrar will create the file with its own Unicode representation
                         rf.extract(member, path=os.path.dirname(extracted_path))
                     except rarfile.RarWrongPassword:
                         logger.warning(f"Wrong password for RAR entry: {member.filename}, skipping.")
@@ -559,13 +515,37 @@ def process_archive(file_path: str, archive_type: str,
                         continue
                     except rarfile.RarCryptoError:
                         logger.warning(f"Encryption error in RAR entry: {member.filename}, skipping.")
+                        failed += 1
+                        context.files_failed += 1
+                        continue
+
+                    # After extraction, the actual file might have a slightly different name due to
+                    # Unicode normalization differences. We locate it by normalizing both expected
+                    # and actual file names to NFC and comparing.
+                    actual_extracted_path = None
+                    expected_basename_nfc = unicodedata.normalize('NFC', os.path.basename(member.filename))
+                    parent_dir = os.path.dirname(extracted_path)
+                    try:
+                        for fname in os.listdir(parent_dir):
+                            if unicodedata.normalize('NFC', fname) == expected_basename_nfc:
+                                actual_extracted_path = os.path.join(parent_dir, fname)
+                                break
+                    except FileNotFoundError:
+                        pass
+
+                    if actual_extracted_path is None:
+                        # Fallback to the constructed path if no match found (should not happen, but just in case)
+                        actual_extracted_path = extracted_path
+
+                    if not os.path.exists(actual_extracted_path):
+                        logger.error(f"Extracted file not found after RAR extraction: {actual_extracted_path}")
                         failed += 1
                         context.files_failed += 1
                         continue
 
                     # Process extracted file
                     result = process_file(
-                        file_path=extracted_path,
+                        file_path=actual_extracted_path,
                         original_filename=member.filename,
                         depth=depth + 1,
                         context=context
@@ -580,7 +560,7 @@ def process_archive(file_path: str, archive_type: str,
                         context.files_failed += 1
                     # Clean up extracted file immediately
                     try:
-                        os.remove(extracted_path)
+                        os.remove(actual_extracted_path)
                     except Exception:
                         pass
 
