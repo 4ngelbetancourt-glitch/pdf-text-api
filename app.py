@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import filetype
 import py7zr
+import rarfile
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -39,6 +40,16 @@ MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200 MB
 MAX_EXTRACTED_FILE_SIZE = 200 * 1024 * 1024  # 200 MB per extracted file
 MAX_ARCHIVE_DEPTH = 3
 MAX_TOTAL_FILES = 2000
+
+# ----------------------------------------------------------------------
+# Configure unrar binary path
+# ----------------------------------------------------------------------
+UNRAR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unrar")
+if os.path.exists(UNRAR_PATH):
+    rarfile.UNRAR_TOOL = UNRAR_PATH
+    logger.info(f"Usando binario unrar en: {UNRAR_PATH}")
+else:
+    logger.warning("Binario unrar no encontrado, el soporte RAR dependerá del PATH del sistema.")
 
 # ----------------------------------------------------------------------
 # Extraction context to track global limits across recursive calls
@@ -129,7 +140,7 @@ def detect_format(file_path: str, original_filename: str) -> str:
         "ods": "ods",
         "zip": "zip",
         "7z": "7z",
-        "rar": "rar",  # not implemented, but detected
+        "rar": "rar",
         "rtf": "rtf",
         "txt": "txt",
         "html": "html",
@@ -155,6 +166,7 @@ def detect_format(file_path: str, original_filename: str) -> str:
         if "opendocument.spreadsheet" in mime: return "ods"
         if "zip" in mime: return "zip"
         if "x-7z" in mime: return "7z"
+        if "rar" in mime: return "rar"
         if "rtf" in mime: return "rtf"
         if "plain" in mime: return "txt"
         if "html" in mime: return "html"
@@ -355,7 +367,7 @@ EXTRACTORS: Dict[str, Any] = {
 }
 
 # ----------------------------------------------------------------------
-# Archive processing (ZIP and 7z)
+# Archive processing (ZIP, 7z, RAR)
 # ----------------------------------------------------------------------
 def process_archive(file_path: str, archive_type: str,
                     original_filename: str, depth: int,
@@ -416,6 +428,7 @@ def process_archive(file_path: str, archive_type: str,
                         os.remove(extracted_path)
                     except Exception:
                         pass
+
         elif archive_type == "7z":
             with py7zr.SevenZipFile(file_path, mode='r') as szf:
                 members = szf.getnames()
@@ -457,8 +470,62 @@ def process_archive(file_path: str, archive_type: str,
                         os.remove(extracted_path)
                     except Exception:
                         pass
+
+        elif archive_type == "rar":
+            with rarfile.RarFile(file_path, 'r') as rf:
+                members = [m for m in rf.infolist() if not m.is_dir()]
+                for member in members:
+                    # Check global limit
+                    if context.files_processed + context.files_failed >= context.max_files:
+                        logger.warning("Reached maximum file limit, skipping remaining entries in RAR.")
+                        break
+                    if depth > context.max_depth:
+                        logger.warning(f"Max depth exceeded for {member.filename}, skipping.")
+                        failed += 1
+                        continue
+                    if member.file_size > context.max_size:
+                        logger.warning(f"File too large inside RAR: {member.filename}")
+                        failed += 1
+                        continue
+                    # Extract single file
+                    extracted_path = os.path.join(temp_dir, member.filename)
+                    os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
+                    try:
+                        rf.extract(member, path=os.path.dirname(extracted_path))
+                    except rarfile.RarWrongPassword:
+                        logger.warning(f"Wrong password for RAR entry: {member.filename}, skipping.")
+                        failed += 1
+                        context.files_failed += 1
+                        continue
+                    except rarfile.RarCryptoError:
+                        logger.warning(f"Encryption error in RAR entry: {member.filename}, skipping.")
+                        failed += 1
+                        context.files_failed += 1
+                        continue
+                    # Process extracted file
+                    result = process_file(
+                        file_path=extracted_path,
+                        original_filename=member.filename,
+                        depth=depth + 1,
+                        context=context
+                    )
+                    if result["success"]:
+                        header = f"==================================================\nARCHIVO: {member.filename}\n=================================================="
+                        combined_text_parts.append(f"{header}\n\n{result['text']}")
+                        processed += 1
+                        context.files_processed += 1
+                    else:
+                        failed += 1
+                        context.files_failed += 1
+                    # Clean up extracted file immediately
+                    try:
+                        os.remove(extracted_path)
+                    except Exception:
+                        pass
+
         else:
             raise ValueError(f"Unsupported archive type: {archive_type}")
+
     except Exception as e:
         logger.error(f"Error processing archive {original_filename}: {e}")
         return {"text": "", "type": archive_type, "success": False,
@@ -501,7 +568,7 @@ def process_file(file_path: str, original_filename: str,
     logger.info(f"Processing file: {original_filename} (detected as {fmt})")
 
     # Handle archives recursively
-    if fmt in ("zip", "7z"):
+    if fmt in ("zip", "7z", "rar"):
         result = process_archive(file_path, fmt, original_filename, depth, context)
         # Update context counters (archive function already updated context.files_processed/failed)
         return result

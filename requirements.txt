@@ -10,3 +10,4 @@ python-pptx
 striprtf
 py7zr
 filetype
+rarfile
