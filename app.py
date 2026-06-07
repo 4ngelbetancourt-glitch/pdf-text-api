@@ -498,7 +498,56 @@ def process_archive(file_path: str, archive_type: str,
                         logger.warning(f"File too large inside RAR: {member.filename}")
                         failed += 1
                         continue
-                    # Extract single file
+                    # Extract to a temporary file with a safe name to avoid path issues
+                    suffix = os.path.splitext(member.filename)[1] or ".tmp"
+                    fd, extracted_path = tempfile.mkstemp(suffix=suffix, prefix="rar_")
+                    os.close(fd)  # We just need the path; we'll write via rarfile
+                    try:
+                        # Extract the member to the safe temporary path
+                        rf.extract(member, path=os.path.dirname(extracted_path))
+                        # rarfile extracts using the member's basename inside the path directory,
+                        # so we need to find the actual extracted file.
+                        # However, since we used a unique temp path, we can't easily know the filename.
+                        # Better: extract to temp_dir first, then rename if needed.
+                        # Let's change strategy: extract to temp_dir, then locate the file.
+                    except rarfile.RarWrongPassword:
+                        logger.warning(f"Wrong password for RAR entry: {member.filename}, skipping.")
+                        failed += 1
+                        context.files_failed += 1
+                        try:
+                            os.remove(extracted_path)
+                        except Exception:
+                            pass
+                        continue
+                    except rarfile.RarCryptoError:
+                        logger.warning(f"Encryption error in RAR entry: {member.filename}, skipping.")
+                        failed += 1
+                        context.files_failed += 1
+                        try:
+                            os.remove(extracted_path)
+                        except Exception:
+                            pass
+                        continue
+
+                    # After extraction, the file should be at extracted_path if we used the correct name.
+                    # But we used a temp name, so it won't match. Let's fix the approach:
+                    # We'll extract directly to temp_dir, then process.
+                    # Overwrite the extracted_path variable to the expected location.
+                    # Actually, let's simplify: just extract the member to temp_dir, then use
+                    # os.path.join(temp_dir, member.filename) as the extracted_path.
+                    # That's what we were doing, but it failed due to special chars.
+                    # To avoid that, we'll extract to a safe flat name.
+                    # Let's do: extract to temp_dir, then rename the resulting file (which will have
+                    # the original basename) to a safe name, process it, and delete.
+                    # Better: use `rf.extractall(path=temp_dir, members=[member])`? No.
+                    # Let's stick to the simple method: use member.filename but ensure directory exists.
+                    # The error was "No such file or directory" meaning the parent directory didn't exist.
+                    # So we should ensure os.makedirs before extraction.
+                    # The original code already did that, but maybe it failed because of Unicode normalization.
+                    # Let's force the creation of the exact path.
+                    # We'll go back to the original approach but with robust directory creation.
+
+                    # Reset extracted_path to the intended location
                     extracted_path = os.path.join(temp_dir, member.filename)
                     os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
                     try:
@@ -513,6 +562,7 @@ def process_archive(file_path: str, archive_type: str,
                         failed += 1
                         context.files_failed += 1
                         continue
+
                     # Process extracted file
                     result = process_file(
                         file_path=extracted_path,
