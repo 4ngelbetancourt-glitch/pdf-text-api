@@ -87,7 +87,7 @@ def clean_text(text: str) -> str:
 def detect_format(file_path: str, original_filename: str) -> str:
     """
     Return a canonical format identifier (lowercase) like 'pdf', 'docx', 'zip'.
-    Uses content sniffing (filetype), fallback to extension, then MIME type.
+    Uses content sniffing (filetype), manual magic bytes, fallback to extension, then MIME type.
     """
     # 1. Content detection
     kind = filetype.guess(file_path)
@@ -129,7 +129,16 @@ def detect_format(file_path: str, original_filename: str) -> str:
             return ext
         return "unknown"
 
-    # 2. Fallback to extension from original filename
+    # 2. Manual magic bytes check for formats not covered by filetype (e.g., RAR)
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(4)
+        if header[:4] == b'Rar!':
+            return "rar"
+    except Exception:
+        pass
+
+    # 3. Fallback to extension from original filename
     ext = os.path.splitext(original_filename)[1].lower().lstrip(".")
     ext_map = {
         "pdf": "pdf",
@@ -154,7 +163,7 @@ def detect_format(file_path: str, original_filename: str) -> str:
     if ext in ext_map:
         return ext_map[ext]
 
-    # 3. Last resort: MIME from filename
+    # 4. Last resort: MIME from filename
     import mimetypes
     mime, _ = mimetypes.guess_type(original_filename)
     if mime:
